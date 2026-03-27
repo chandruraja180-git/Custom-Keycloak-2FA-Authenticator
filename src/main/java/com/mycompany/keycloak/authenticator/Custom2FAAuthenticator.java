@@ -7,20 +7,38 @@ import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
 import org.keycloak.http.HttpRequest;
+
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.MultivaluedMap;
+
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
 import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.stream.Collectors;
 
 public class Custom2FAAuthenticator implements Authenticator {
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
-        // Show the 2FA form
+        //  Check if OTP already exists in session (Prevents new OTP on language change)
+        String existingOtp = context.getAuthenticationSession().getAuthNote("OTP");
+        String otpToShow;
+
+        if (existingOtp == null) {
+            otpToShow = String.valueOf((int)(Math.random() * 900000) + 100000);
+            context.getAuthenticationSession().setAuthNote("OTP", otpToShow);
+            context.getAuthenticationSession().setAuthNote("OTP_TIME", String.valueOf(System.currentTimeMillis()));
+            System.out.println("Generated NEW OTP: " + otpToShow);
+        } else {
+            otpToShow = existingOtp;
+            System.out.println("Language changed or refresh. Reusing OTP: " + otpToShow);
+        }
+
+        // Pass the OTP to the FreeMarker template
         Response challenge = context.form()
+                .setAttribute("otp", otpToShow)
                 .createForm("2fa-form.ftl");
         context.challenge(challenge);
     }
@@ -30,97 +48,74 @@ public class Custom2FAAuthenticator implements Authenticator {
         try {
             HttpRequest request = context.getHttpRequest();
             MultivaluedMap<String, String> formData = request.getDecodedFormParameters();
-            String otp = formData.getFirst("otp");
+            String enteredOtp = formData.getFirst("otp");
 
-            System.out.println("DEBUG: User entered OTP: " + otp);
+            String storedOtp = context.getAuthenticationSession().getAuthNote("OTP");
+            String otpTimeStr = context.getAuthenticationSession().getAuthNote("OTP_TIME");
 
-            if (otp == null || otp.isEmpty()) {
-                Response challenge = context.form()
-                        .setError("otp.empty")
-                        .createForm("2fa-form.ftl");
-                context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, challenge);
+            // 1. Validate Input
+            if (enteredOtp == null || enteredOtp.isEmpty()) {
+                context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
+                        context.form().setError("otp.empty").createForm("2fa-form.ftl"));
                 return;
             }
 
-            // Call Beeceptor API
-            String apiUrl = "https://keycloak2fa.free.beeceptor.com/verify?otp=" + otp;
+            // 2. Validate Expiry (60 Seconds)
+            long otpTime = Long.parseLong(otpTimeStr);
+            if ((System.currentTimeMillis() - otpTime) > 60000) {
+                context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
+                        context.form().setError("otp.expired").createForm("2fa-form.ftl"));
+                return;
+            }
+
+            // 3. Validate Match
+            if (!enteredOtp.equals(storedOtp)) {
+                context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
+                        context.form().setError("otp.failed").createForm("2fa-form.ftl"));
+                return;
+            }
+
+            // 4. Call Mock API (Beeceptor)
+            String username = context.getUser().getUsername();
+            String apiUrl = "https://keycloak2fa.free.beeceptor.com/verify?username=" + username;
+
             URL url = new URL(apiUrl);
             HttpURLConnection conn = (HttpURLConnection) url.openConnection();
             conn.setRequestMethod("GET");
-            conn.setConnectTimeout(5000);
-            conn.setReadTimeout(5000);
+            conn.setConnectTimeout(3000);
 
-            int responseCode = conn.getResponseCode();
-            System.out.println("DEBUG: API Response Code: " + responseCode);
+            if (conn.getResponseCode() == 200) {
+                InputStream is = conn.getInputStream();
+                String responseBody = new BufferedReader(new InputStreamReader(is))
+                        .lines().collect(Collectors.joining());
 
-            // Read the response body
-            InputStream stream = (responseCode >= 200 && responseCode < 300)
-                    ? conn.getInputStream()
-                    : conn.getErrorStream();
+                // Simple JSON Parsing for cardNumber
+                String cardNumber = responseBody.split("\"cardNumber\"\\s*:\\s*\"")[1].split("\"")[0];
 
-            BufferedReader reader = new BufferedReader(new InputStreamReader(stream));
-            StringBuilder responseBuilder = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                responseBuilder.append(line);
-            }
-            reader.close();
+                // 5. Store in User Attribute (Required for Token Mapper)
+                context.getUser().setSingleAttribute("cardNumber", cardNumber);
 
-            String responseBody = responseBuilder.toString().toLowerCase();
-            System.out.println("DEBUG: API Response Body: " + responseBody);
+                System.out.println("Success! Card Number " + cardNumber + " stored for user " + username);
 
-            //  RECTIFIED VALIDATION: Check for specific "success" status in JSON
-            if (responseBody.contains("\"status\":\"success\"") || responseBody.contains("\"status\": \"success\"")) {
-                System.out.println("✅ OTP VERIFIED SUCCESS");
-
-                // Explicitly tell the session this step passed
-                context.getAuthenticationSession().setAuthNote("CUSTOM_2FA_PASSED", "true");
-
-                String cardNumber = "N/A";
-                try {
-                    if (responseBody.contains("cardnumber")) {
-                        // Basic JSON extraction
-                        cardNumber = responseBody.split("\"cardnumber\"\\s*:\\s*\"")[1].split("\"")[0];
-                    }
-                } catch (Exception e) {
-                    System.out.println("DEBUG: Could not parse cardNumber from JSON");
-                }
-
-                // Store card number in user attribute
-                UserModel user = context.getUser();
-                user.setSingleAttribute("cardNumber", cardNumber);
-                System.out.println("DEBUG: Stored attribute cardNumber: " + cardNumber);
+                // Cleanup session notes
+                context.getAuthenticationSession().removeAuthNote("OTP");
+                context.getAuthenticationSession().removeAuthNote("OTP_TIME");
 
                 context.success();
             } else {
-                //  THIS IS THE FAILURE PATH
-                System.out.println(" OTP FAILED: API response did not indicate success");
-
-                Response challenge = context.form()
-                        .setError("otp.failed") // Ensure this key exists in messages_en.properties
-                        .createForm("2fa-form.ftl");
-
-                context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS, challenge);
+                context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,
+                        context.form().setError("otp.error").createForm("2fa-form.ftl"));
             }
 
         } catch (Exception e) {
             e.printStackTrace();
-            Response challenge = context.form()
-                    .setError("otp.error")
-                    .createForm("2fa-form.ftl");
-            context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR, challenge);
+            context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,
+                    context.form().setError("otp.error").createForm("2fa-form.ftl"));
         }
     }
 
-    @Override
-    public boolean requiresUser() { return true; }
-
-    @Override
-    public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) { return true; }
-
-    @Override
-    public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {}
-
-    @Override
-    public void close() {}
+    @Override public boolean requiresUser() { return true; }
+    @Override public boolean configuredFor(KeycloakSession s, RealmModel r, UserModel u) { return true; }
+    @Override public void setRequiredActions(KeycloakSession s, RealmModel r, UserModel u) {}
+    @Override public void close() {}
 }
