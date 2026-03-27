@@ -1,0 +1,11 @@
+body { background-color: #121212; color: white; font-family: sans-serif; }
+#kc-header-wrapper { display: none; }
+#kc-locale { position: absolute; top: 15px; right: 20px; z-index: 1000; }
+#kc-current-locale-link { color: #00AA4F; text-decoration: none; font-weight: bold; padding: 6px 12px; border: 1px solid #00AA4F; border-radius: 4px; background-color: #1e242c; }
+.grootan-locale-list { display: none; position: absolute; right: 0; top: 30px; background-color: #1e242c; list-style: none; padding: 10px; border: 1px solid #444; border-radius: 4px; min-width: 120px; }
+#kc-locale-wrapper:hover .grootan-locale-list { display: block; }
+.kc-dropdown-item a { color: white; text-decoration: none; display: block; padding: 8px 10px; }
+.login-pf-page .card-pf { background-color: #1e242c; border-top: 5px solid #00AA4F; border-radius: 8px; padding: 40px; margin-top: 80px; }
+.grootan-header { font-size: 26px; font-weight: bold; text-align: center; margin-bottom: 30px; }
+input[type="text"], input[type="password"] { width: 100%; padding: 12px; margin-bottom: 20px; background-color: #2c333d; border: 1px solid #444; border-radius: 4px; color: white; }
+.btn-grootan { background-color: #00AA4F; color: white; border: none; padding: 14px; width: 100%; cursor: pointer; border-radius: 4px; font-weight: bold; }
