@@ -22,7 +22,7 @@ public class Custom2FAAuthenticator implements Authenticator {
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
-        //  Check if OTP already exists in session (Prevents new OTP on language change)
+
         String existingOtp = context.getAuthenticationSession().getAuthNote("OTP");
         String otpToShow;
 
@@ -33,18 +33,19 @@ public class Custom2FAAuthenticator implements Authenticator {
             System.out.println("Generated NEW OTP: " + otpToShow);
         } else {
             otpToShow = existingOtp;
-            System.out.println("Language changed or refresh. Reusing OTP: " + otpToShow);
+            System.out.println("Reusing OTP: " + otpToShow);
         }
 
-        // Pass the OTP to the FreeMarker template
         Response challenge = context.form()
                 .setAttribute("otp", otpToShow)
                 .createForm("2fa-form.ftl");
+
         context.challenge(challenge);
     }
 
     @Override
     public void action(AuthenticationFlowContext context) {
+
         try {
             HttpRequest request = context.getHttpRequest();
             MultivaluedMap<String, String> formData = request.getDecodedFormParameters();
@@ -60,7 +61,7 @@ public class Custom2FAAuthenticator implements Authenticator {
                 return;
             }
 
-            // 2. Validate Expiry (60 Seconds)
+            // 2. Validate Expiry
             long otpTime = Long.parseLong(otpTimeStr);
             if ((System.currentTimeMillis() - otpTime) > 60000) {
                 context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
@@ -75,47 +76,120 @@ public class Custom2FAAuthenticator implements Authenticator {
                 return;
             }
 
-            // 4. Call Mock API (Beeceptor)
+            System.out.println("OTP VERIFIED SUCCESS");
+
+            // 4. Call External API with Retry
             String username = context.getUser().getUsername();
             String apiUrl = "https://keycloak2fa.free.beeceptor.com/verify?username=" + username;
 
-            URL url = new URL(apiUrl);
-            HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-            conn.setRequestMethod("GET");
-            conn.setConnectTimeout(3000);
+            System.out.println("Calling API: " + apiUrl);
 
-            if (conn.getResponseCode() == 200) {
-                InputStream is = conn.getInputStream();
-                String responseBody = new BufferedReader(new InputStreamReader(is))
-                        .lines().collect(Collectors.joining());
+            String responseBody = callExternalApiWithRetry(apiUrl, 3, 1000);
 
-                // Simple JSON Parsing for cardNumber
-                String cardNumber = responseBody.split("\"cardNumber\"\\s*:\\s*\"")[1].split("\"")[0];
+            System.out.println("API Response: " + responseBody);
 
-                // 5. Store in User Attribute (Required for Token Mapper)
-                context.getUser().setSingleAttribute("cardNumber", cardNumber);
-
-                System.out.println("Success! Card Number " + cardNumber + " stored for user " + username);
-
-                // Cleanup session notes
-                context.getAuthenticationSession().removeAuthNote("OTP");
-                context.getAuthenticationSession().removeAuthNote("OTP_TIME");
-
-                context.success();
-            } else {
-                context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,
-                        context.form().setError("otp.error").createForm("2fa-form.ftl"));
+            // 5. Validate Response
+            if (responseBody == null || !responseBody.contains("cardNumber")) {
+                throw new RuntimeException("Invalid API response: cardNumber missing");
             }
+
+            // 6. Extract cardNumber safely
+            String cardNumber = responseBody
+                    .split("\"cardNumber\"\\s*:\\s*\"")[1]
+                    .split("\"")[0];
+
+            // 7. Store attribute
+            context.getUser().setSingleAttribute("cardNumber", cardNumber);
+
+            System.out.println("Stored cardNumber: " + cardNumber);
+
+            // Cleanup
+            context.getAuthenticationSession().removeAuthNote("OTP");
+            context.getAuthenticationSession().removeAuthNote("OTP_TIME");
+
+            context.success();
 
         } catch (Exception e) {
             e.printStackTrace();
+
+            System.out.println("API failed after retries: " + e.getMessage());
+
             context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,
                     context.form().setError("otp.error").createForm("2fa-form.ftl"));
         }
     }
 
-    @Override public boolean requiresUser() { return true; }
-    @Override public boolean configuredFor(KeycloakSession s, RealmModel r, UserModel u) { return true; }
-    @Override public void setRequiredActions(KeycloakSession s, RealmModel r, UserModel u) {}
-    @Override public void close() {}
+    /**
+     * Retry Logic for External API Call
+     */
+    private String callExternalApiWithRetry(String apiUrl, int maxRetries, long delayMs) throws Exception {
+
+        int attempt = 0;
+        Exception lastException = null;
+
+        while (attempt < maxRetries) {
+            try {
+                System.out.println("API Attempt: " + (attempt + 1));
+
+                URL url = new URL(apiUrl);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(3000);
+                conn.setReadTimeout(3000);
+
+                int status = conn.getResponseCode();
+
+                // ❌ Retry for server errors
+                if (status >= 500) {
+                    throw new RuntimeException("Server error: " + status);
+                }
+
+                // ❌ Fail fast for client errors
+                if (status >= 400) {
+                    throw new RuntimeException("Client error: " + status);
+                }
+
+                // ✅ Only accept 200
+                if (status != 200) {
+                    throw new RuntimeException("Unexpected status: " + status);
+                }
+
+                InputStream is = conn.getInputStream();
+                return new BufferedReader(new InputStreamReader(is))
+                        .lines()
+                        .collect(Collectors.joining());
+
+            } catch (Exception e) {
+                lastException = e;
+                attempt++;
+
+                System.out.println("API call failed (attempt " + attempt + "): " + e.getMessage());
+
+                if (attempt < maxRetries) {
+                    long waitTime = delayMs * (long) Math.pow(2, attempt);
+                    System.out.println("Retrying in " + waitTime + " ms...");
+                    Thread.sleep(waitTime);
+                }
+            }
+        }
+
+        System.out.println("Final failure after retries");
+        throw lastException;
+    }
+
+    @Override
+    public boolean requiresUser() {
+        return true;
+    }
+
+    @Override
+    public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
+        return true;
+    }
+
+    @Override
+    public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {}
+
+    @Override
+    public void close() {}
 }
