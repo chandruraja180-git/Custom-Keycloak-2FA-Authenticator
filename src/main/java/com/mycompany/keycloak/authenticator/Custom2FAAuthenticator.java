@@ -3,6 +3,7 @@ package com.mycompany.keycloak.authenticator;
 import org.keycloak.authentication.Authenticator;
 import org.keycloak.authentication.AuthenticationFlowContext;
 import org.keycloak.authentication.AuthenticationFlowError;
+import org.keycloak.events.EventType;
 import org.keycloak.models.KeycloakSession;
 import org.keycloak.models.RealmModel;
 import org.keycloak.models.UserModel;
@@ -22,7 +23,6 @@ public class Custom2FAAuthenticator implements Authenticator {
 
     @Override
     public void authenticate(AuthenticationFlowContext context) {
-
         String existingOtp = context.getAuthenticationSession().getAuthNote("OTP");
         String otpToShow;
 
@@ -45,7 +45,6 @@ public class Custom2FAAuthenticator implements Authenticator {
 
     @Override
     public void action(AuthenticationFlowContext context) {
-
         try {
             HttpRequest request = context.getHttpRequest();
             MultivaluedMap<String, String> formData = request.getDecodedFormParameters();
@@ -54,23 +53,26 @@ public class Custom2FAAuthenticator implements Authenticator {
             String storedOtp = context.getAuthenticationSession().getAuthNote("OTP");
             String otpTimeStr = context.getAuthenticationSession().getAuthNote("OTP_TIME");
 
-            // 1. Validate Input
+            // 1. Validate Input - Audit Event: otp_empty
             if (enteredOtp == null || enteredOtp.isEmpty()) {
+                context.getEvent().user(context.getUser()).error("otp_empty");
                 context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
                         context.form().setError("otp.empty").createForm("2fa-form.ftl"));
                 return;
             }
 
-            // 2. Validate Expiry
+            // 2. Validate Expiry - Audit Event: otp_expired
             long otpTime = Long.parseLong(otpTimeStr);
             if ((System.currentTimeMillis() - otpTime) > 60000) {
+                context.getEvent().user(context.getUser()).error("otp_expired");
                 context.failureChallenge(AuthenticationFlowError.EXPIRED_CODE,
                         context.form().setError("otp.expired").createForm("2fa-form.ftl"));
                 return;
             }
 
-            // 3. Validate Match
+            // 3. Validate Match - Audit Event: invalid_otp_code
             if (!enteredOtp.equals(storedOtp)) {
+                context.getEvent().user(context.getUser()).error("invalid_otp_code");
                 context.failureChallenge(AuthenticationFlowError.INVALID_CREDENTIALS,
                         context.form().setError("otp.failed").createForm("2fa-form.ftl"));
                 return;
@@ -82,14 +84,11 @@ public class Custom2FAAuthenticator implements Authenticator {
             String username = context.getUser().getUsername();
             String apiUrl = "https://keycloak2fa.free.beeceptor.com/verify?username=" + username;
 
-            System.out.println("Calling API: " + apiUrl);
-
             String responseBody = callExternalApiWithRetry(apiUrl, 3, 1000);
 
-            System.out.println("API Response: " + responseBody);
-
-            // 5. Validate Response
+            // 5. Validate Response - Audit Event: api_response_invalid
             if (responseBody == null || !responseBody.contains("cardNumber")) {
+                context.getEvent().user(context.getUser()).error("api_response_invalid");
                 throw new RuntimeException("Invalid API response: cardNumber missing");
             }
 
@@ -101,36 +100,28 @@ public class Custom2FAAuthenticator implements Authenticator {
             // 7. Store attribute
             context.getUser().setSingleAttribute("cardNumber", cardNumber);
 
-            System.out.println("Stored cardNumber: " + cardNumber);
-
             // Cleanup
             context.getAuthenticationSession().removeAuthNote("OTP");
             context.getAuthenticationSession().removeAuthNote("OTP_TIME");
 
+            // 8. Success - Audit Event: LOGIN (standard success)
             context.success();
 
         } catch (Exception e) {
             e.printStackTrace();
-
-            System.out.println("API failed after retries: " + e.getMessage());
-
+            // 9. Exception Catch - Audit Event: external_api_failure
+            context.getEvent().user(context.getUser()).error("external_api_failure");
             context.failureChallenge(AuthenticationFlowError.INTERNAL_ERROR,
                     context.form().setError("otp.error").createForm("2fa-form.ftl"));
         }
     }
 
-    /**
-     * Retry Logic for External API Call
-     */
     private String callExternalApiWithRetry(String apiUrl, int maxRetries, long delayMs) throws Exception {
-
         int attempt = 0;
         Exception lastException = null;
 
         while (attempt < maxRetries) {
             try {
-                System.out.println("API Attempt: " + (attempt + 1));
-
                 URL url = new URL(apiUrl);
                 HttpURLConnection conn = (HttpURLConnection) url.openConnection();
                 conn.setRequestMethod("GET");
@@ -138,21 +129,9 @@ public class Custom2FAAuthenticator implements Authenticator {
                 conn.setReadTimeout(3000);
 
                 int status = conn.getResponseCode();
-
-                // ❌ Retry for server errors
-                if (status >= 500) {
-                    throw new RuntimeException("Server error: " + status);
-                }
-
-                // ❌ Fail fast for client errors
-                if (status >= 400) {
-                    throw new RuntimeException("Client error: " + status);
-                }
-
-                // ✅ Only accept 200
-                if (status != 200) {
-                    throw new RuntimeException("Unexpected status: " + status);
-                }
+                if (status >= 500) throw new RuntimeException("Server error: " + status);
+                if (status >= 400) throw new RuntimeException("Client error: " + status);
+                if (status != 200) throw new RuntimeException("Unexpected status: " + status);
 
                 InputStream is = conn.getInputStream();
                 return new BufferedReader(new InputStreamReader(is))
@@ -162,34 +141,16 @@ public class Custom2FAAuthenticator implements Authenticator {
             } catch (Exception e) {
                 lastException = e;
                 attempt++;
-
-                System.out.println("API call failed (attempt " + attempt + "): " + e.getMessage());
-
                 if (attempt < maxRetries) {
-                    long waitTime = delayMs * (long) Math.pow(2, attempt);
-                    System.out.println("Retrying in " + waitTime + " ms...");
-                    Thread.sleep(waitTime);
+                    Thread.sleep(delayMs * (long) Math.pow(2, attempt));
                 }
             }
         }
-
-        System.out.println("Final failure after retries");
         throw lastException;
     }
 
-    @Override
-    public boolean requiresUser() {
-        return true;
-    }
-
-    @Override
-    public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) {
-        return true;
-    }
-
-    @Override
-    public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {}
-
-    @Override
-    public void close() {}
+    @Override public boolean requiresUser() { return true; }
+    @Override public boolean configuredFor(KeycloakSession session, RealmModel realm, UserModel user) { return true; }
+    @Override public void setRequiredActions(KeycloakSession session, RealmModel realm, UserModel user) {}
+    @Override public void close() {}
 }

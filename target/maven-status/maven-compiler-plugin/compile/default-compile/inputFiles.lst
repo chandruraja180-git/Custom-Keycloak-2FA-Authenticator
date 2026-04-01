@@ -1,2 +1,4 @@
+/Users/grootan/Downloads/custom-2fa-authenticator-project/src/main/java/com/mycompany/keycloak/authenticator/events/KafkaEventListenerProviderFactory.java
 /Users/grootan/Downloads/custom-2fa-authenticator-project/src/main/java/com/mycompany/keycloak/authenticator/Custom2FAAuthenticator.java
+/Users/grootan/Downloads/custom-2fa-authenticator-project/src/main/java/com/mycompany/keycloak/authenticator/events/KafkaEventListenerProvider.java
 /Users/grootan/Downloads/custom-2fa-authenticator-project/src/main/java/com/mycompany/keycloak/authenticator/Custom2FAAuthenticatorFactory.java
