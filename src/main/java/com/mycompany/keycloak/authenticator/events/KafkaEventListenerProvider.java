@@ -33,7 +33,7 @@ public class KafkaEventListenerProvider implements EventListenerProvider {
         }
     }
 
-    // ✅ Correct method name
+    //   method name
     @Override
     public void onEvent(AdminEvent adminEvent, boolean includeRepresentation) {
         // You can ignore or log admin events
