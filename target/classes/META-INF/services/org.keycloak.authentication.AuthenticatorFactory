@@ -1,1 +1,2 @@
 com.mycompany.keycloak.authenticator.Custom2FAAuthenticatorFactory
+com.mycompany.keycloak.authenticator.address.AddressCaptureAuthenticatorFactory

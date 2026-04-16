@@ -1,4 +1,7 @@
-com/mycompany/keycloak/authenticator/Custom2FAAuthenticatorFactory.class
+com/mycompany/keycloak/authenticator/db/DBUtil.class
 com/mycompany/keycloak/authenticator/events/KafkaEventListenerProvider.class
-com/mycompany/keycloak/authenticator/events/KafkaEventListenerProviderFactory.class
+com/mycompany/keycloak/authenticator/address/AddressCaptureAuthenticator.class
+com/mycompany/keycloak/authenticator/address/AddressCaptureAuthenticatorFactory.class
 com/mycompany/keycloak/authenticator/Custom2FAAuthenticator.class
+com/mycompany/keycloak/authenticator/Custom2FAAuthenticatorFactory.class
+com/mycompany/keycloak/authenticator/events/KafkaEventListenerProviderFactory.class
